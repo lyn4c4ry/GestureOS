@@ -42,17 +42,20 @@ BTN_X2, BTN_Y2 = WIDTH - 10, 50
 
 # ── Mutable app state ──────────────────────────────────────────────────────────
 state = {
-    "mode":            "FREE",   # DRAW | FREE | ERASE | INTERACTIVE
-    "prev_point":      None,     # last drawn point for continuous lines
-    "save_flash":      0,        # frame counter for the save confirmation flash
+    "main_mode":       "DRAWING",  # DRAWING | INTERACTIVE
+    "selected_mode":   None,       # Mode pending selection in menu (None if not selected)
+    "sub_mode":        "FREE",     # FREE | DRAW | ERASE (for DRAWING mode)
+    "prev_point":      None,       # last drawn point for continuous lines
+    "save_flash":      0,          # frame counter for the save confirmation flash
     "screenshots_dir": str(Path.home() / "Desktop"),
     "btn_clicked":     False,
     "mouse_pos":       (0, 0),
-    "show_ui":         False,    # Feature to toggle settings overlay
-    "fullscreen_toggle": True,   # Toggle fullscreen mode in settings
-    "mode_menu_open":  False,    # Mode selection menu
-    "ok_gesture_active": False,  # Track if OK gesture was active to prevent toggle spam
-    "right_hand_mode": "FREE"    # Right hand mode (used for mode menu)
+    "show_ui":         False,      # Feature to toggle settings overlay
+    "fullscreen_toggle": True,     # Toggle fullscreen mode in settings
+    "menu_open":       False,      # Main mode selection menu
+    "ok_gesture_hold":  0,         # Frame counter for OK gesture hold
+    "gesture_1_hold":   0,         # Frame counter for gesture 1 hold
+    "gesture_2_hold":   0,         # Frame counter for gesture 2 hold
 }
 Path(state["screenshots_dir"]).mkdir(parents=True, exist_ok=True)
 
@@ -70,6 +73,32 @@ def only_index_up(landmarks):
         landmarks[16].y > landmarks[14].y,
         landmarks[20].y > landmarks[18].y,
     ])
+
+def is_gesture_1(landmarks):
+    """Gesture 1: Only index finger extended (for left hand mode selection)."""
+    return all([
+        landmarks[8].y  < landmarks[6].y,
+        landmarks[12].y > landmarks[10].y,
+        landmarks[16].y > landmarks[14].y,
+        landmarks[20].y > landmarks[18].y,
+    ])
+
+def is_gesture_2(landmarks):
+    """Gesture 2: Index and middle fingers extended (for left hand mode selection)."""
+    return all([
+        landmarks[8].y  < landmarks[6].y,
+        landmarks[12].y < landmarks[10].y,
+        landmarks[16].y > landmarks[14].y,
+        landmarks[20].y > landmarks[18].y,
+    ])
+
+def is_ok_gesture(landmarks, w, h):
+    """Return True if OK gesture is detected (thumb and index close together)."""
+    thumb_pos = get_pos(landmarks[4], w, h)
+    index_pos = get_pos(landmarks[8], w, h)
+    distance = math.sqrt((thumb_pos[0] - index_pos[0])**2 + (thumb_pos[1] - index_pos[1])**2)
+    # Just need thumb and index close together
+    return distance < 70
 
 def is_open_hand(landmarks):
     """Return True if all four fingers are extended (open palm)."""
@@ -250,6 +279,69 @@ def draw_settings_ui(frame):
 
     cv2.addWeighted(overlay, 0.92, frame, 0.08, 0, frame)
 
+def draw_main_menu(frame):
+    """Draw the main mode selection menu."""
+    overlay = frame.copy()
+    
+    # Menu dimensions
+    menu_width = 500
+    menu_height = 400
+    menu_x1 = WIDTH // 2 - menu_width // 2
+    menu_y1 = HEIGHT // 2 - menu_height // 2
+    menu_x2 = menu_x1 + menu_width
+    menu_y2 = menu_y1 + menu_height
+    
+    # Shadow effect
+    cv2.rectangle(overlay, (menu_x1 + 3, menu_y1 + 3), (menu_x2 + 3, menu_y2 + 3), (10, 10, 10), -1)
+    
+    # Main menu background
+    cv2.rectangle(overlay, (menu_x1, menu_y1), (menu_x2, menu_y2), (30, 30, 30), -1)
+    cv2.rectangle(overlay, (menu_x1, menu_y1), (menu_x2, menu_y2), (100, 200, 255), 4)
+    
+    # Title bar
+    cv2.rectangle(overlay, (menu_x1, menu_y1), (menu_x2, menu_y1 + 70), (50, 100, 150), -1)
+    
+    # Title
+    cv2.putText(overlay, "MAIN MODE MENU", (menu_x1 + 80, menu_y1 + 50),
+                cv2.FONT_HERSHEY_DUPLEX, 1.3, (255, 255, 255), 2)
+    
+    # Mode buttons
+    modes = ["DRAWING", "INTERACTIVE"]
+    colors = [(0, 255, 100), (255, 150, 0)]
+    
+    button_height = 80
+    button_y_start = menu_y1 + 100
+    
+    for idx, (mode, color) in enumerate(zip(modes, colors)):
+        button_y1 = button_y_start + idx * (button_height + 40)
+        button_y2 = button_y1 + button_height
+        
+        # Highlight selected mode (pending)
+        if state["selected_mode"] == mode:
+            highlight_color = tuple(min(c + 50, 255) for c in color)
+            cv2.rectangle(overlay, (menu_x1 + 20, button_y1), (menu_x2 - 20, button_y2), highlight_color, -1)
+            cv2.rectangle(overlay, (menu_x1 + 20, button_y1), (menu_x2 - 20, button_y2), (255, 255, 255), 4)
+        else:
+            cv2.rectangle(overlay, (menu_x1 + 20, button_y1), (menu_x2 - 20, button_y2), (50, 50, 50), -1)
+            cv2.rectangle(overlay, (menu_x1 + 20, button_y1), (menu_x2 - 20, button_y2), color, 3)
+        
+        # Button label (gesture number)
+        gesture_num = idx + 1
+        cv2.putText(overlay, f"Gesture {gesture_num}", (menu_x1 + 40, button_y1 + 30),
+                    cv2.FONT_HERSHEY_DUPLEX, 0.8, (150, 150, 150), 1)
+        
+        # Button text
+        text_color = (255, 255, 255) if state["selected_mode"] == mode else color
+        cv2.putText(overlay, mode, (menu_x1 + 110, button_y1 + 65),
+                    cv2.FONT_HERSHEY_DUPLEX, 1.2, text_color, 2)
+    
+    # Instructions
+    cv2.putText(overlay, "Left hand: 1 finger = DRAWING | 2 fingers = INTERACTIVE",
+                (menu_x1 + 20, menu_y2 - 20),
+                cv2.FONT_HERSHEY_DUPLEX, 0.6, (100, 200, 150), 1)
+    
+    cv2.addWeighted(overlay, 0.95, frame, 0.05, 0, frame)
+
 def open_folder_dialog():
     """Open a folder selection dialog and return the chosen path."""
     root = Tk()
@@ -312,6 +404,8 @@ while True:
         results = hands.process(rgb)
 
         left_landmarks  = None
+        right_landmarks = None
+        
         if results.multi_hand_landmarks and results.multi_handedness:
             for i, hand_landmarks in enumerate(results.multi_hand_landmarks):
                 label_raw = results.multi_handedness[i].classification[0].label
@@ -323,55 +417,110 @@ while True:
                 if label == "LEFT":
                     left_landmarks = hand_landmarks.landmark
                 elif label == "RIGHT":
-                    lm = hand_landmarks.landmark
-                    index  = lm[8].y  < lm[6].y
-                    middle = lm[12].y < lm[10].y
-                    ring   = lm[16].y < lm[14].y
-                    pinky  = lm[20].y < lm[18].y
+                    right_landmarks = hand_landmarks.landmark
 
-                    if index and not middle and not ring and not pinky:
-                        state["mode"] = "DRAW"
-                    elif index and middle and not ring and not pinky:
-                        state["mode"] = "FREE"
-                    elif index and middle and ring and not pinky:
-                        state["mode"] = "ERASE"
+        # ── Menu logic: Right hand OK gesture to toggle menu ──
+        if right_landmarks:
+            ok_detected = is_ok_gesture(right_landmarks, w, h)
+            if ok_detected:
+                state["ok_gesture_hold"] += 1
+                # Toggle menu after 10 frames of holding gesture (faster response)
+                if state["ok_gesture_hold"] == 10:
+                    if not state["menu_open"]:
+                        # Open menu
+                        state["menu_open"] = True
+                        state["selected_mode"] = None  # Reset selection
+                    else:
+                        # Menu is open
+                        if state["selected_mode"]:
+                            # Confirm selection and activate mode
+                            state["main_mode"] = state["selected_mode"]
+                            state["sub_mode"] = "FREE"  # Always start in FREE mode
+                            state["menu_open"] = False
+                            state["selected_mode"] = None
+                        else:
+                            # Close menu without selection
+                            state["menu_open"] = False
+                    state["ok_gesture_hold"] = 0  # Reset immediately
+            else:
+                state["ok_gesture_hold"] = 0
 
-        # ── Drawing logic (Left hand) ──
-        if left_landmarks:
-            if state["mode"] == "DRAW":
-                if only_index_up(left_landmarks):
-                    draw_point = get_pos(left_landmarks[8], w, h)
-                    if state["prev_point"]:
-                        cv2.line(canvas, state["prev_point"], draw_point, DRAW_COLOR, DRAW_THICKNESS)
-                    state["prev_point"] = draw_point
-                    # Enhanced pen indicator with glow
-                    cv2.circle(frame, draw_point, 12, (0, 150, 0), 2)
-                    cv2.circle(frame, draw_point, 8, DRAW_COLOR, -1)
-                    cv2.circle(frame, draw_point, 4, (255, 255, 255), -1)
-                else:
+        # ── Menu mode: Left hand gestures to select main mode ──
+        if state["menu_open"] and left_landmarks:
+            gesture_1_detected = is_gesture_1(left_landmarks)
+            gesture_2_detected = is_gesture_2(left_landmarks)
+            
+            if gesture_1_detected:
+                state["gesture_1_hold"] += 1
+                # Activate after 8 frames (smoother, faster)
+                if state["gesture_1_hold"] == 8:
+                    state["selected_mode"] = "DRAWING"  # Just mark selection
+                    state["gesture_1_hold"] = 0
+            else:
+                state["gesture_1_hold"] = 0
+            
+            if gesture_2_detected:
+                state["gesture_2_hold"] += 1
+                # Activate after 8 frames (smoother, faster)
+                if state["gesture_2_hold"] == 8:
+                    state["selected_mode"] = "INTERACTIVE"  # Just mark selection
+                    state["gesture_2_hold"] = 0
+            else:
+                state["gesture_2_hold"] = 0
+
+        # ── Drawing mode logic ──
+        if state["main_mode"] == "DRAWING" and not state["menu_open"]:
+            # Right hand controls sub-mode selection
+            if right_landmarks:
+                lm = right_landmarks
+                index  = lm[8].y  < lm[6].y
+                middle = lm[12].y < lm[10].y
+                ring   = lm[16].y < lm[14].y
+                pinky  = lm[20].y < lm[18].y
+
+                if index and not middle and not ring and not pinky:
+                    state["sub_mode"] = "DRAW"
+                elif index and middle and not ring and not pinky:
+                    state["sub_mode"] = "FREE"
+                elif index and middle and ring and not pinky:
+                    state["sub_mode"] = "ERASE"
+
+            # Left hand controls drawing
+            if left_landmarks:
+                if state["sub_mode"] == "DRAW":
+                    if only_index_up(left_landmarks):
+                        draw_point = get_pos(left_landmarks[8], w, h)
+                        if state["prev_point"]:
+                            cv2.line(canvas, state["prev_point"], draw_point, DRAW_COLOR, DRAW_THICKNESS)
+                        state["prev_point"] = draw_point
+                        # Enhanced pen indicator with glow
+                        cv2.circle(frame, draw_point, 12, (0, 150, 0), 2)
+                        cv2.circle(frame, draw_point, 8, DRAW_COLOR, -1)
+                        cv2.circle(frame, draw_point, 4, (255, 255, 255), -1)
+                    else:
+                        state["prev_point"] = None
+                elif state["sub_mode"] == "FREE":
                     state["prev_point"] = None
-            elif state["mode"] == "FREE":
-                state["prev_point"] = None
-            elif state["mode"] == "ERASE":
-                if is_open_hand(left_landmarks):
-                    size   = hand_size(left_landmarks, w, h)
-                    center = hand_center(left_landmarks, w, h)
-                    cv2.circle(canvas, center, size, (0, 0, 0), -1)
-                    # Enhanced eraser indicator with animation
-                    cv2.circle(frame, center, size + 5, (100, 100, 255), 2)
-                    cv2.circle(frame, center, size, (0, 100, 255), 2)
-                    cv2.circle(frame, center, size - 5, (255, 100, 0), 1)
-                    state["prev_point"] = None
-                elif only_index_up(left_landmarks):
-                    draw_point = get_pos(left_landmarks[8], w, h)
-                    if state["prev_point"]:
-                        cv2.line(canvas, state["prev_point"], draw_point, (0, 0, 0), ERASER_SIZE)
-                    state["prev_point"] = draw_point
-                    # Enhanced eraser pen with visual feedback
-                    cv2.circle(frame, draw_point, ERASER_SIZE // 2 + 3, (100, 100, 255), 2)
-                    cv2.circle(frame, draw_point, ERASER_SIZE // 2, (0, 100, 255), 2)
-                else:
-                    state["prev_point"] = None
+                elif state["sub_mode"] == "ERASE":
+                    if is_open_hand(left_landmarks):
+                        size   = hand_size(left_landmarks, w, h)
+                        center = hand_center(left_landmarks, w, h)
+                        cv2.circle(canvas, center, size, (0, 0, 0), -1)
+                        # Enhanced eraser indicator with animation
+                        cv2.circle(frame, center, size + 5, (100, 100, 255), 2)
+                        cv2.circle(frame, center, size, (0, 100, 255), 2)
+                        cv2.circle(frame, center, size - 5, (255, 100, 0), 1)
+                        state["prev_point"] = None
+                    elif only_index_up(left_landmarks):
+                        draw_point = get_pos(left_landmarks[8], w, h)
+                        if state["prev_point"]:
+                            cv2.line(canvas, state["prev_point"], draw_point, (0, 0, 0), ERASER_SIZE)
+                        state["prev_point"] = draw_point
+                        # Enhanced eraser pen with visual feedback
+                        cv2.circle(frame, draw_point, ERASER_SIZE // 2 + 3, (100, 100, 255), 2)
+                        cv2.circle(frame, draw_point, ERASER_SIZE // 2, (0, 100, 255), 2)
+                    else:
+                        state["prev_point"] = None
         else:
             state["prev_point"] = None
 
@@ -385,13 +534,13 @@ while True:
         mode_bg_colors = {"DRAW": (20, 80, 20), "FREE": (20, 60, 100), "ERASE": (20, 60, 100)}
         
         # Mode indicator with background panel
-        cv2.rectangle(frame, (8, 8), (320, 65), mode_bg_colors[state['mode']], -1)
-        cv2.rectangle(frame, (8, 8), (320, 65), mode_colors[state['mode']], 3)
+        cv2.rectangle(frame, (8, 8), (320, 65), mode_bg_colors[state['sub_mode']], -1)
+        cv2.rectangle(frame, (8, 8), (320, 65), mode_colors[state['sub_mode']], 3)
         # Mode text shadow
-        cv2.putText(frame, f"MODE: {state['mode']}", (13, 42),
+        cv2.putText(frame, f"MODE: {state['sub_mode']}", (13, 42),
                     cv2.FONT_HERSHEY_DUPLEX, 1.1, (20, 20, 20), 3)
-        cv2.putText(frame, f"MODE: {state['mode']}", (12, 41),
-                    cv2.FONT_HERSHEY_DUPLEX, 1.1, mode_colors[state["mode"]], 2)
+        cv2.putText(frame, f"MODE: {state['sub_mode']}", (12, 41),
+                    cv2.FONT_HERSHEY_DUPLEX, 1.1, mode_colors[state["sub_mode"]], 2)
 
         # Path display with enhanced styling
         display_path = state["screenshots_dir"]
@@ -401,8 +550,15 @@ while True:
         cv2.putText(frame, f"Save: {display_path}", (14, 88), cv2.FONT_HERSHEY_DUPLEX, 0.5, (100, 100, 100), 1)
         cv2.putText(frame, f"Save: {display_path}", (13, 87), cv2.FONT_HERSHEY_DUPLEX, 0.5, (200, 200, 200), 1)
 
+        # Main mode indicator
+        main_mode_color = (0, 255, 150) if state["main_mode"] == "DRAWING" else (255, 150, 0)
+        cv2.rectangle(frame, (8, 100), (280, 128), (30, 30, 30), -1)
+        cv2.rectangle(frame, (8, 100), (280, 128), main_mode_color, 2)
+        cv2.putText(frame, f"MAIN: {state['main_mode']}", (15, 120), 
+                    cv2.FONT_HERSHEY_DUPLEX, 0.7, main_mode_color, 2)
+
         # Controls text with background
-        controls_text = "RIGHT: 1=Draw | 2=Free | 3=Erase  |  S=Snapshot | D=Drawing | C=Clear | Q=Quit"
+        controls_text = "RIGHT: OK=Menu  |  LEFT: Draw/Select  |  S=Snapshot | D=Drawing | C=Clear | Q=Quit"
         cv2.rectangle(frame, (8, h - 28), (w - 8, h - 2), (25, 25, 25), -1)
         cv2.rectangle(frame, (8, h - 28), (w - 8, h - 2), (80, 80, 80), 2)
         cv2.putText(frame, controls_text, (14, h - 10), cv2.FONT_HERSHEY_DUPLEX, 0.48, (80, 80, 80), 2)
@@ -415,6 +571,14 @@ while True:
             state["show_ui"] = True
             state["btn_clicked"] = False
         draw_settings_button(frame, hover=hovered)
+        
+        # Draw menu if open
+        if state["menu_open"]:
+            draw_main_menu(frame)
+        
+        # INTERACTIVE mode placeholder (will be implemented later)
+        # if state["main_mode"] == "INTERACTIVE" and not state["menu_open"]:
+        #     Add interactive mode features here
 
     else:
         # ── UI MODE ──
@@ -470,6 +634,16 @@ while True:
     elif key == ord('d'):
         save_screenshot(frame, canvas, True)
         state["save_flash"] = 15
+    elif key == ord('1'):  # Mark DRAWING mode as selected (opens menu if closed)
+        if not state["menu_open"]:
+            state["menu_open"] = True
+            state["selected_mode"] = None
+        state["selected_mode"] = "DRAWING"
+    elif key == ord('2'):  # Mark INTERACTIVE mode as selected (opens menu if closed)
+        if not state["menu_open"]:
+            state["menu_open"] = True
+            state["selected_mode"] = None
+        state["selected_mode"] = "INTERACTIVE"
 
 cap.release()
 hands.close()
